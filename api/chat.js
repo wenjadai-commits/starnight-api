@@ -29,7 +29,8 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         message: message.slice(0, 2000),
         mood: typeof mood === 'string' ? mood.slice(0, 50) : '未知',
-        history: Array.isArray(history) ? history.slice(-6) : []
+        history: Array.isArray(history) ? history.slice(-6) : [],
+        token: process.env.INTERNAL_API_KEY
       })
     });
 
