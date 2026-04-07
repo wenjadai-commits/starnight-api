@@ -4,7 +4,6 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -19,7 +18,16 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'invalid_message' });
   }
 
-  const systemPrompt = `你是「星夜」App 裡的 AI 陪伴者。你的角色是一個溫暖、有同理心的傾聽者。
+  // Debug logging
+  console.log('[Starfold] Incoming message:', message.slice(0, 100));
+  console.log('[Starfold] OPENAI_API_KEY exists:', !!process.env.OPENAI_API_KEY);
+
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('[Starfold] OPENAI_API_KEY is not set!');
+    return res.status(500).json({ error: 'missing_api_key' });
+  }
+
+  const systemPrompt = `你是「Starfold」App 裡的 AI 陪伴者。你的角色是一個溫暖、有同理心的傾聽者。
 
 ## 你的個性
 - 溫柔、有耐心，像深夜裡陪伴的朋友
@@ -69,12 +77,29 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error('OpenAI error:', response.status, errText);
-      return res.status(502).json({ error: 'ai_service_error' });
+      console.error('[Starfold] OpenAI error:', response.status, errText);
+
+      // Parse OpenAI error for specific issues
+      let errorCode = 'ai_service_error';
+      try {
+        const errData = JSON.parse(errText);
+        const errType = errData?.error?.type || '';
+        if (errType.includes('insufficient_quota') || response.status === 429) {
+          errorCode = 'quota_exceeded';
+        } else if (errType.includes('invalid_api_key') || response.status === 401) {
+          errorCode = 'invalid_api_key';
+        } else if (errType.includes('model_not_found')) {
+          errorCode = 'model_not_found';
+        }
+      } catch {}
+
+      return res.status(response.status).json({ error: errorCode });
     }
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content;
+
+    console.log('[Starfold] Reply length:', reply ? reply.length : 0);
 
     if (!reply) {
       return res.status(502).json({ error: 'empty_response' });
@@ -83,7 +108,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply });
 
   } catch (err) {
-    console.error('Chat error:', err);
-    return res.status(500).json({ error: 'server_error' });
+    console.error('[Starfold] Unexpected error:', err.message);
+    return res.status(500).json({ error: 'server_error', detail: err.message });
   }
 }
