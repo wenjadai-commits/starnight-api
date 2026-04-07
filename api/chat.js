@@ -1,6 +1,30 @@
+// Simple in-memory rate limit (per IP, resets on cold start)
+const rateMap = new Map();
+const RATE_LIMIT = 30; // max requests per window
+const RATE_WINDOW = 60000; // 1 minute
+
+function checkRate(ip) {
+  const now = Date.now();
+  const entry = rateMap.get(ip);
+  if (!entry || now - entry.start > RATE_WINDOW) {
+    rateMap.set(ip, { start: now, count: 1 });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= RATE_LIMIT;
+}
+
 export default async function handler(req, res) {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // CORS - only allow your frontend
+  const allowedOrigins = [
+    'https://wenjadai-commits.github.io',
+    'http://localhost:3000',
+    'http://127.0.0.1:5500'
+  ];
+  const origin = req.headers.origin || '';
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -12,18 +36,23 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'method_not_allowed' });
   }
 
+  // Rate limit
+  const ip = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown';
+  if (!checkRate(ip)) {
+    console.log('[Starfold] Rate limited:', ip);
+    return res.status(429).json({ error: 'rate_limit' });
+  }
+
   const { message, mood, history } = req.body || {};
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'invalid_message' });
   }
 
-  // Debug logging
-  console.log('[Starfold] Incoming message:', message.slice(0, 100));
+  console.log('[Starfold] Message:', message.slice(0, 80));
   console.log('[Starfold] OPENAI_API_KEY exists:', !!process.env.OPENAI_API_KEY);
 
   if (!process.env.OPENAI_API_KEY) {
-    console.error('[Starfold] OPENAI_API_KEY is not set!');
     return res.status(500).json({ error: 'missing_api_key' });
   }
 
@@ -61,12 +90,17 @@ export default async function handler(req, res) {
   messages.push({ role: 'user', content: userContent });
 
   try {
+    // Backend timeout for OpenAI call
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: messages,
@@ -74,16 +108,16 @@ export default async function handler(req, res) {
         temperature: 0.8,
       })
     });
+    clearTimeout(timeout);
 
     if (!response.ok) {
       const errText = await response.text();
       console.error('[Starfold] OpenAI error:', response.status, errText);
 
-      // Parse OpenAI error for specific issues
       let errorCode = 'ai_service_error';
       try {
         const errData = JSON.parse(errText);
-        const errType = errData?.error?.type || '';
+        const errType = errData?.error?.type || errData?.error?.code || '';
         if (errType.includes('insufficient_quota') || response.status === 429) {
           errorCode = 'quota_exceeded';
         } else if (errType.includes('invalid_api_key') || response.status === 401) {
@@ -108,7 +142,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply });
 
   } catch (err) {
+    if (err.name === 'AbortError') {
+      console.error('[Starfold] OpenAI timeout');
+      return res.status(504).json({ error: 'ai_timeout' });
+    }
     console.error('[Starfold] Unexpected error:', err.message);
-    return res.status(500).json({ error: 'server_error', detail: err.message });
+    return res.status(500).json({ error: 'server_error' });
   }
 }
