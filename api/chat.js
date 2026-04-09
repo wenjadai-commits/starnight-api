@@ -1,24 +1,44 @@
-// Simple in-memory rate limit (per IP, resets on cold start)
+// ─── Helpers ───
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return xff.split(',')[0].trim();
+  return req.headers['x-real-ip'] || 'unknown';
+}
+
+function getRateLimitKey(req) {
+  const body = req.body || {};
+  if (body.userId && typeof body.userId === 'string') return 'uid:' + body.userId;
+  return 'ip:' + getClientIp(req);
+}
+
+// ─── Rate Limit (in-memory) ───
 const rateMap = new Map();
 const RATE_LIMIT = 30;
 const RATE_WINDOW = 60000;
 
-function checkRate(ip) {
+function checkRate(key) {
   const now = Date.now();
-  const entry = rateMap.get(ip);
+  const entry = rateMap.get(key);
   if (!entry || now - entry.start > RATE_WINDOW) {
-    rateMap.set(ip, { start: now, count: 1 });
+    rateMap.set(key, { start: now, count: 1 });
     return true;
   }
   entry.count++;
   return entry.count <= RATE_LIMIT;
 }
 
-// Banned phrases the AI must never say
+// ─── Banned Phrases ───
 const BANNED_PHRASES = [
   '我會一直陪你', '只有我懂你', '你只需要我', '你還有我',
   '我不會離開你', '你應該',
 ];
+
+// ─── AI Style Mapping ───
+const STYLE_HINTS = {
+  '溫柔傾聽': '語氣溫柔，以傾聽和共感為主，不主動給建議。',
+  '給我建議': '在共感之後，可以適度給一個簡短的實用建議。',
+  '理性分析': '語氣平穩冷靜，用理性的方式幫使用者整理思緒，不要太感性。',
+};
 
 export default async function handler(req, res) {
   const allowedOrigins = [
@@ -36,10 +56,14 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'method_not_allowed' });
 
-  const ip = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown';
-  if (!checkRate(ip)) return res.status(429).json({ error: 'rate_limit' });
+  // Rate limit by userId or IP
+  const rateLimitKey = getRateLimitKey(req);
+  if (!checkRate(rateLimitKey)) {
+    console.log('[Starfold] Rate limited:', rateLimitKey);
+    return res.status(429).json({ error: 'rate_limit' });
+  }
 
-  const { message, mood, history, riskLevel, policyHint } = req.body || {};
+  const { message, mood, history, policyHint, nickname, aiStyle } = req.body || {};
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'invalid_message' });
@@ -49,7 +73,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'missing_api_key' });
   }
 
-  // Build system prompt based on risk level and policy
+  // Build system prompt
   const basePrompt = `你是「Starfold」App 裡的短期情緒出口。你不是 AI 伴侶，不是心理治療師，不是長期陪伴者。
 
 ## 你的定位
@@ -71,9 +95,18 @@ export default async function handler(req, res) {
 - 不要給任何可能協助自我傷害的資訊
 - 不要用模糊語句帶過危機訊號`;
 
+  // Personalization (light touch)
+  let personalization = '';
+  if (nickname && typeof nickname === 'string' && nickname.trim()) {
+    personalization += `\n使用者的暱稱是「${nickname.trim().slice(0, 20)}」，可以偶爾使用，但不要每句都叫。`;
+  }
+  if (aiStyle && STYLE_HINTS[aiStyle]) {
+    personalization += `\n使用者偏好的陪伴風格：${STYLE_HINTS[aiStyle]}`;
+  }
+
   const policyAddendum = policyHint ? `\n\n## 本次回應策略\n${policyHint}` : '';
 
-  const systemPrompt = basePrompt + policyAddendum;
+  const systemPrompt = basePrompt + personalization + policyAddendum;
 
   const messages = [{ role: 'system', content: systemPrompt }];
 
@@ -106,7 +139,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: messages,
-        max_tokens: 150, // short responses only
+        max_tokens: 150,
         temperature: 0.7,
       })
     });
@@ -121,6 +154,7 @@ export default async function handler(req, res) {
         const errType = errData?.error?.type || errData?.error?.code || '';
         if (errType.includes('insufficient_quota') || response.status === 429) errorCode = 'quota_exceeded';
         else if (errType.includes('invalid_api_key') || response.status === 401) errorCode = 'invalid_api_key';
+        else if (errType.includes('model_not_found')) errorCode = 'model_not_found';
       } catch {}
       return res.status(response.status).json({ error: errorCode });
     }
@@ -135,7 +169,6 @@ export default async function handler(req, res) {
     reply = reply.trim();
 
     if (!reply) return res.status(502).json({ error: 'empty_response' });
-
     return res.status(200).json({ reply });
 
   } catch (err) {
