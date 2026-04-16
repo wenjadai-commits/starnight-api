@@ -31,6 +31,8 @@ function checkRate(key) {
 const BANNED_PHRASES = [
   '我會一直陪你', '只有我懂你', '你只需要我', '你還有我',
   '我不會離開你', '你應該',
+  'ずっとそばにいるよ', '僕だけが君を理解できる',
+  "I'll always be with you", 'You only need me',
 ];
 
 // ─── AI Style Mapping ───
@@ -63,7 +65,7 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'rate_limit' });
   }
 
-  const { message, mood, history, policyHint, nickname, aiStyle } = req.body || {};
+  const { message, mood, history, policyHint, nickname, aiStyle, language } = req.body || {};
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'invalid_message' });
@@ -73,8 +75,16 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'missing_api_key' });
   }
 
+  // Language instruction
+  const LANG_INSTRUCTIONS = {
+    'ja': '日本語で回答してください。',
+    'en': 'Reply in English.',
+    'zh-TW': '用繁體中文回應。',
+  };
+  const langInstruction = LANG_INSTRUCTIONS[language] || LANG_INSTRUCTIONS['zh-TW'];
+
   // Build system prompt
-  const basePrompt = `你是「Starfold」App 裡的短期情緒出口。你不是 AI 伴侶，不是心理治療師，不是長期陪伴者。
+  const basePrompt = `你是「藏星瓶」App 裡的短期情緒出口。你不是 AI 伴侶，不是心理治療師，不是長期陪伴者。
 
 ## 你的定位
 - 讓使用者有一個低負擔的情緒出口
@@ -83,7 +93,7 @@ export default async function handler(req, res) {
 - 在風險情況下導向真人支持
 
 ## 回應規則
-- 用繁體中文
+- ${langInstruction}
 - 回應最多 2 句話，簡短溫暖
 - 不主動追問、不延長對話
 - 不做心理分析、不模擬診斷
