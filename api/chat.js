@@ -42,6 +42,25 @@ const STYLE_HINTS = {
   '理性分析': '語氣平穩冷靜，用理性的方式幫使用者整理思緒，不要太感性。',
 };
 
+// ─── Tier Configuration ───
+// Free vs Pro: model, max_tokens, response style
+const TIER_CONFIG = {
+  free: {
+    model: 'gpt-4o-mini',
+    max_tokens: 150,
+    responseGuide: '回應最多 2 句話，簡短溫暖。',
+  },
+  pro: {
+    model: 'gpt-4o',
+    max_tokens: 320,
+    responseGuide: '回應最多 4 句話，溫暖且細緻，可以表達更多陪伴感和理解。',
+  },
+};
+
+function getTierConfig(tier) {
+  return tier === 'pro' ? TIER_CONFIG.pro : TIER_CONFIG.free;
+}
+
 export default async function handler(req, res) {
   const allowedOrigins = [
     'https://wenjadai-commits.github.io',
@@ -65,7 +84,7 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'rate_limit' });
   }
 
-  const { message, mood, history, policyHint, nickname, aiStyle, language } = req.body || {};
+  const { message, mood, history, policyHint, nickname, aiStyle, language, tier, memory } = req.body || {};
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'invalid_message' });
@@ -75,6 +94,10 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'missing_api_key' });
   }
 
+  // Determine tier (default free for safety/cost)
+  const userTier = tier === 'pro' ? 'pro' : 'free';
+  const tierConfig = getTierConfig(userTier);
+
   // Language instruction
   const LANG_INSTRUCTIONS = {
     'ja': '日本語で回答してください。',
@@ -83,7 +106,7 @@ export default async function handler(req, res) {
   };
   const langInstruction = LANG_INSTRUCTIONS[language] || LANG_INSTRUCTIONS['zh-TW'];
 
-  // Build system prompt
+  // Build system prompt — response length differs by tier
   const basePrompt = `你是「藏星瓶」App 裡的短期情緒出口。你不是 AI 伴侶，不是心理治療師，不是長期陪伴者。
 
 ## 你的定位
@@ -94,7 +117,7 @@ export default async function handler(req, res) {
 
 ## 回應規則
 - ${langInstruction}
-- 回應最多 2 句話，簡短溫暖
+- ${tierConfig.responseGuide}
 - 不主動追問、不延長對話
 - 不做心理分析、不模擬診斷
 - 不說「我會一直陪你」「你還有我」等依附性語句
@@ -105,7 +128,7 @@ export default async function handler(req, res) {
 - 不要給任何可能協助自我傷害的資訊
 - 不要用模糊語句帶過危機訊號`;
 
-  // Personalization (light touch)
+  // Personalization
   let personalization = '';
   if (nickname && typeof nickname === 'string' && nickname.trim()) {
     personalization += `\n使用者的暱稱是「${nickname.trim().slice(0, 20)}」，可以偶爾使用，但不要每句都叫。`;
@@ -114,9 +137,15 @@ export default async function handler(req, res) {
     personalization += `\n使用者偏好的陪伴風格：${STYLE_HINTS[aiStyle]}`;
   }
 
+  // Pro-only: long-term memory injection (lightweight, ~50 tokens)
+  let memoryBlock = '';
+  if (userTier === 'pro' && memory && typeof memory === 'string' && memory.trim()) {
+    memoryBlock = `\n\n## 關於使用者（請自然融入回應，不要直接複述）\n${memory.trim().slice(0, 200)}`;
+  }
+
   const policyAddendum = policyHint ? `\n\n## 本次回應策略\n${policyHint}` : '';
 
-  const systemPrompt = basePrompt + personalization + policyAddendum;
+  const systemPrompt = basePrompt + personalization + memoryBlock + policyAddendum;
 
   const messages = [{ role: 'system', content: systemPrompt }];
 
@@ -147,9 +176,9 @@ export default async function handler(req, res) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: tierConfig.model,
         messages: messages,
-        max_tokens: 150,
+        max_tokens: tierConfig.max_tokens,
         temperature: 0.7,
       })
     });
