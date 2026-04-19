@@ -1,5 +1,8 @@
 {
   "name": "starnight-api",
   "version": "1.0.0",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
 }
